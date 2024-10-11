@@ -1490,6 +1490,8 @@ class PreprocessStoreFuzzerRunResultsTest(unittest.TestCase):
     self.mock._sign_url.side_effect = (
         lambda remote_path, method, minutes: remote_path)
     self.mock.get_signed_upload_url.return_value = self.SIGNED_URL
+    helpers.patch_environ(self)
+    os.environ['JOB_NAME'] = 'linux_chrome_asan'
 
   def test_preprocess_store_fuzzer_run_results(self):
     fuzz_task_input = uworker_msg_pb2.FuzzTaskInput()
@@ -1506,6 +1508,9 @@ class PostprocessStoreFuzzerRunResultsTest(unittest.TestCase):
 
   def test_postprocess_store_fuzzer_run_results(self):
     """Tests postprocess_store_fuzzer_run_results."""
+    helpers.patch_environ(self)
+    job_name = 'linux_chrome_asan'
+    os.environ['JOB_NAME'] = job_name
     fuzzer_name = 'myfuzzer'
     revision = 1
     fuzzer = data_types.Fuzzer(name=fuzzer_name, revision=revision)
@@ -1521,7 +1526,9 @@ class PostprocessStoreFuzzerRunResultsTest(unittest.TestCase):
     fuzz_task_input = uworker_msg_pb2.FuzzTaskInput(
         sample_testcase_upload_key=sample_testcase_upload_key)
     uworker_input = uworker_msg_pb2.Input(
-        fuzzer_name=fuzzer_name, fuzz_task_input=fuzz_task_input)
+        fuzzer_name=fuzzer_name,
+        fuzz_task_input=fuzz_task_input,
+        job_type=job_name)
     output = uworker_msg_pb2.Output(
         fuzz_task_output=uworker_msg_pb2.FuzzTaskOutput(
             fuzzer_run_results=fuzzer_run_results, fuzzer_revision=revision),
@@ -1551,17 +1558,23 @@ class UploadTestcaseRunJsons(unittest.TestCase):
     self.assertEqual(self.mock.upload_stats.call_count, 1)
 
 
+@test_utils.with_cloud_emulators('datastore')
 class PickFuzzTargetTest(unittest.TestCase):
   """Tests for _pick_fuzz_target."""
 
   def setUp(self):
     helpers.patch_environ(self)
+    helpers.patch(self, [
+        'clusterfuzz._internal.build_management.build_manager._split_target_build_list_targets'
+    ])
+    self.mock._split_target_build_list_targets.return_value = ['target']
 
   def test_split_build(self):
     """Tests that we don't pick a target for a split build."""
-    os.environ['FUZZ_TARGET_BUILD_BUCKET_PATH'] = 'Fake'
+    os.environ[
+        'FUZZ_TARGET_BUILD_BUCKET_PATH'] = 'gs://fuzz_target/%TARGET%/path'
     os.environ['JOB_NAME'] = 'libfuzzer_chrome_asan'
-    self.assertIsNone(fuzz_task._pick_fuzz_target())
+    self.assertEqual(fuzz_task._pick_fuzz_target(), 'target')
 
 
 def _create_uworker_input(job='job',

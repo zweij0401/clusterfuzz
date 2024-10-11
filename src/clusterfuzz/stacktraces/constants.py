@@ -248,6 +248,8 @@ SECURITY_CHECK_FAILURE_REGEX = re.compile(
     r'.*\[[^\]]*[:]([^\](]*).*\].*Security CHECK failed[:]\s*(.*)\.\s*')
 SECURITY_DCHECK_FAILURE_REGEX = re.compile(
     r'.*\[[^\]]*[:]([^\](]*).*\].*Security DCHECK failed[:]\s*(.*)\.\s*')
+SYMBOL_NOT_FOUND_REGEX = re.compile(
+    r'.*: cannot locate symbol ([`\'"])(.*)\1 referenced by')
 TRUSTY_STACK_FRAME_REGEX = re.compile(
     r'(uSP)\+([a-zA-Z0-9]{6}): (0x[a-fA-F0-9]{16}) in (\w+)')
 UBSAN_DIVISION_BY_ZERO_REGEX = re.compile(r'.*division by zero.*')
@@ -300,8 +302,9 @@ UBSAN_VPTR_INVALID_DOWNCAST_REGEX = re.compile(
 UBSAN_VPTR_INVALID_OFFSET_REGEX = re.compile(
     r'.*at offset (\d+) within object of type (.*)')
 UBSAN_VPTR_INVALID_VPTR_REGEX = re.compile(r'.*note: object has invalid vptr')
-V8_ABORT_FAILURE_REGEX = re.compile(r'^abort: (CSA_ASSERT failed:.*)')
-V8_ABORT_METADATA_REGEX = re.compile(r'(.*) \[(.*):\d+\]$')
+V8_ABORT_FAILURE_REGEX = re.compile(
+    r'^abort: (CSA_(?:ASSERT|DCHECK) failed: .*)')
+V8_ABORT_METADATA_REGEX = re.compile(r'(.*?) \[(.*):\d+\]$')
 V8_CORRECTNESS_FAILURE_REGEX = re.compile(r'#\s*V8 correctness failure')
 V8_CORRECTNESS_METADATA_REGEX = re.compile(
     r'#\s*V8 correctness ((configs|sources|suppression): .*)')
@@ -549,6 +552,7 @@ STACK_FRAME_IGNORE_REGEXES = [
     r'.*libpthread',
     r'.*logger',
     r'.*logging::CheckError',
+    r'.*logging::`anonymous namespace\'::CheckLogMessage',
     r'.*logging::ErrnoLogMessage',
     r'.*logging::LogMessage',
     r'.*stdext::exception::what',

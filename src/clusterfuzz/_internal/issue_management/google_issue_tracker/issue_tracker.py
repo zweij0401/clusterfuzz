@@ -30,7 +30,6 @@ from clusterfuzz._internal.issue_management.google_issue_tracker import client
 from clusterfuzz._internal.metrics import logs
 
 _NUM_RETRIES = 3
-_ISSUE_TRACKER_URL = 'https://issues.chromium.org/issues'
 
 # TODO: Make these configuration settings instead of hardcoded values in code.
 # These custom fields use repeated enums.
@@ -94,15 +93,22 @@ def _extract_all_labels(labels: issue_tracker.LabelStore,
   return results
 
 
-def _sanitize_oses(oses: List[str]):
-  """Sanitize the OS custom field values.
+def _sanitize_oses(oses: Sequence[str]) -> List[str]:
+  """Sanitizes the given OS custom field values."""
+  result = []
+  for os in oses:
+    # Skip empty OS values. Workaround for https://crbug.com/366955327.
+    if not os:
+      continue
 
-  The OS custom field no longer has the 'Chrome' value.
-  It was replaced by 'ChromeOS'.
-  """
-  for i, os_field in enumerate(oses):
-    if os_field == 'Chrome':
-      oses[i] = 'ChromeOS'
+    # The OS custom field no longer has the 'Chrome' value.
+    # It was replaced by 'ChromeOS'.
+    if os == 'Chrome':
+      os = 'ChromeOS'
+
+    result.append(os)
+
+  return result
 
 
 def _extract_label(labels: Sequence[str], prefix: str) -> Optional[str]:
@@ -412,6 +418,12 @@ class Issue(issue_tracker.Issue):
     """The issue's component ID."""
     return self._data['issueState']['componentId']
 
+  @component_id.setter
+  def component_id(self, component_id):
+    """Setter for component_id."""
+    self._changed.add('component_id')
+    self._data['issueState']['componentId'] = component_id
+
   @property
   def components(self):
     """The issue's component tags."""
@@ -434,7 +446,7 @@ class Issue(issue_tracker.Issue):
         break
 
   @property
-  def _os_custom_field_values(self):
+  def _os_custom_field_values(self) -> List[str]:
     """OS custom field values."""
     custom_fields = self._data['issueState'].get('customFields', [])
     for cf in custom_fields:
@@ -560,15 +572,15 @@ class Issue(issue_tracker.Issue):
     # Special case OS custom field.
     added_oses = _get_labels(self.labels.added, 'OS-')
     if added_oses:
-      oses = self._os_custom_field_values
-      oses.extend(added_oses)
-      _sanitize_oses(oses)
-      custom_field_entries.append({
-          'customFieldId': _CHROMIUM_OS_CUSTOM_FIELD_ID,
-          'repeatedEnumValue': {
-              'values': oses,
-          }
-      })
+      oses = set(self._os_custom_field_values)
+      new_oses = oses.union(_sanitize_oses(added_oses))
+      if oses != new_oses:
+        custom_field_entries.append({
+            'customFieldId': _CHROMIUM_OS_CUSTOM_FIELD_ID,
+            'repeatedEnumValue': {
+                'values': list(sorted(new_oses)),
+            }
+        })
     # Remove all OS labels or they will be attempted to be added as
     # hotlist IDs.
     self.labels.remove_by_prefix('OS-')
@@ -589,7 +601,7 @@ class Issue(issue_tracker.Issue):
     self.labels.remove_by_prefix('ReleaseBlock-')
 
     # Special case: OSS-Fuzz "Reported" custom field.
-    added_reported = _get_oss_fuzz_reported_value(self.labels.added)
+    added_reported = _get_oss_fuzz_reported_value(self.labels)
     if added_reported:
       custom_field_entries.append({
           'customFieldId': _OSS_FUZZ_REPORTED_CUSTOM_FIELD_ID,
@@ -597,7 +609,7 @@ class Issue(issue_tracker.Issue):
       })
 
     # Special case: OSS-Fuzz "Project" custom field.
-    added_project = _extract_label(self.labels.added, 'Proj-')
+    added_project = _extract_label(self.labels, 'Proj-')
     if added_project:
       # Assume there is only one.
       custom_field_entries.append({
@@ -657,6 +669,18 @@ class Issue(issue_tracker.Issue):
           'comment': new_comment,
       }
     result = self._data
+    if 'component_id' in self._changed:
+      # This is a special case here, because changing the component id requires
+      # a move operation. However, we still treat that as an update for
+      # simplicity.
+      move_body = {
+          'componentId': self.component_id,
+          'significanceOverride': 'MAJOR' if notify else 'SILENT'
+      }
+      result = self.issue_tracker._execute(
+          self.issue_tracker.client.issues().move(
+              issueId=str(self.id), body=move_body))
+      logs.info('google_issue_tracker: move result: %s' % result)
     if added or removed or new_comment:
       logs.info('google_issue_tracker: modify update_body: %s' % update_body)
       result = self.issue_tracker._execute(
@@ -704,13 +728,13 @@ class Issue(issue_tracker.Issue):
         self._data['issueState']['priority'] = priority
 
       custom_field_entries = []
-      oses = _extract_all_labels(self.labels, 'OS-')
+      oses = _sanitize_oses(_extract_all_labels(self.labels, 'OS-'))
       if oses:
-        _sanitize_oses(oses)
+        oses.sort()
         custom_field_entries.append({
             'customFieldId': _CHROMIUM_OS_CUSTOM_FIELD_ID,
             'repeatedEnumValue': {
-                'values': oses
+                'values': oses,
             },
         })
       releaseblocks = _extract_all_labels(self.labels, 'ReleaseBlock-')
@@ -944,6 +968,7 @@ class IssueTracker(issue_tracker.IssueTracker):
     self._client = http_client
     self._default_component_id = config['default_component_id']
     self._type = config['type'] if hasattr(config, 'type') else None
+    self._url = config['url']
 
   @property
   def client(self):
@@ -1055,13 +1080,13 @@ class IssueTracker(issue_tracker.IssueTracker):
 
   def find_issues_url(self, keywords=None, only_open=None):
     """Finds issues (web URL)."""
-    return (_ISSUE_TRACKER_URL + '?' + urllib.parse.urlencode({
+    return (self._url + '?' + urllib.parse.urlencode({
         'q': _get_query(keywords, only_open),
     }))
 
   def issue_url(self, issue_id):
     """Returns the issue URL with the given ID."""
-    return _ISSUE_TRACKER_URL + '/' + str(issue_id)
+    return self._url + '/' + str(issue_id)
 
   @property
   def label_type(self):

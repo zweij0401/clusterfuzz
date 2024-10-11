@@ -36,7 +36,10 @@ from clusterfuzz._internal.system import archive
 from clusterfuzz._internal.system import environment
 from clusterfuzz._internal.system import shell
 
+ENGINE_FUZZER_NAMES = ['afl', 'centipede', 'googlefuzztest', 'libFuzzer']
 MAX_TESTCASE_DIRECTORY_SIZE = 10 * 1024 * 1024  # in bytes.
+MAX_TESTCASES = 25000
+TESTCASES_REPORT_INTERVAL = 2500
 STORED_TESTCASES_LIST = []
 
 # pylint: disable=broad-exception-raised
@@ -44,42 +47,46 @@ STORED_TESTCASES_LIST = []
 
 def unpack_crash_testcases(crash_testcases_directory):
   """Unpacks the old crash testcases in the provided directory."""
-  for testcase in ndb_utils.get_all_from_model(data_types.Testcase):
+  count = 0
+  # Make sure that it is a unique crash testcase. Ignore duplicates,
+  # uploaded repros. Check if the testcase is fixed. If not, skip.
+  # Only use testcases that have bugs associated with them.
+  # Sort latest first.
+  testcases = data_types.Testcase.query(
+      ndb_utils.is_false(
+          data_types.Testcase.open), data_types.Testcase.status == 'Processed',
+      data_types.Testcase.bug_information !=
+      '').order(-data_types.Testcase.timestamp)
+  for testcase in testcases:
+    count += 1
+    if count >= MAX_TESTCASES:
+      logs.info(f'{MAX_TESTCASES} testcases reached.')
+      break
+    if count % TESTCASES_REPORT_INTERVAL == 0:
+      logs.info(f'Processed {count} testcases.')
+
     testcase_id = testcase.key.id()
 
-    # 1. If we have already stored the testcase, then just skip.
+    # If we have already stored the testcase, then just skip.
     if testcase_id in STORED_TESTCASES_LIST:
       continue
 
-    # 2. Make sure that it is a unique crash testcase. Ignore duplicates,
-    # uploaded repros.
-    if testcase.status != 'Processed':
-      continue
-
-    # 3. Check if the testcase is fixed. If not, skip.
-    if testcase.open:
-      continue
-
-    # 4. Check if the testcase has a minimized repro. If not, skip.
+    # Check if the testcase has a minimized repro. If not, skip.
     if not testcase.minimized_keys or testcase.minimized_keys == 'NA':
       continue
 
-    # 5. Only use testcases that have bugs associated with them.
-    if not testcase.bug_information:
-      continue
-
-    # 6. Existing IPC testcases are un-interesting and unused in further
+    # Existing IPC testcases are un-interesting and unused in further
     # mutations. Due to size bloat, ignoring these for now.
     if testcase.absolute_path.endswith(testcase_manager.IPCDUMP_EXTENSION):
       continue
 
-    # 7. Ignore testcases that are archives (e.g. Langfuzz fuzzer tests).
+    # Ignore testcases that are archives (e.g. Langfuzz fuzzer tests).
     if archive.get_archive_type(testcase.absolute_path):
       continue
 
-    # 8. Skip in-process fuzzer testcases, since these are only applicable to
+    # Skip in-process fuzzer testcases, since these are only applicable to
     # fuzz targets and don't run with blackbox binaries.
-    if testcase.fuzzer_name and testcase.fuzzer_name in ['afl', 'libFuzzer']:
+    if testcase.fuzzer_name and testcase.fuzzer_name in ENGINE_FUZZER_NAMES:
       continue
 
     # Un-pack testcase.
@@ -102,6 +109,7 @@ def unpack_crash_testcases(crash_testcases_directory):
     STORED_TESTCASES_LIST.append(testcase_id)
 
   # Remove testcase directories that exceed the max size limit.
+  logs.info('Removing large directories.')
   for directory_name in os.listdir(crash_testcases_directory):
     directory_path = os.path.join(crash_testcases_directory, directory_name)
     if not os.path.isdir(directory_path):
@@ -113,6 +121,7 @@ def unpack_crash_testcases(crash_testcases_directory):
     shell.remove_directory(directory_path)
 
   # Rename all fuzzed testcase files as regular files.
+  logs.info('Renaming testcase files.')
   for root, _, files in os.walk(crash_testcases_directory):
     for filename in files:
       if not filename.startswith(testcase_manager.FUZZ_PREFIX):
@@ -145,21 +154,6 @@ def clone_git_repository(tests_directory, name, repo_url):
 
   if os.path.exists(directory):
     subprocess.check_call(['git', 'pull'], cwd=directory)
-  else:
-    raise Exception('Unable to checkout %s tests.' % name)
-
-
-def checkout_svn_repository(tests_directory, name, repo_url):
-  """Checkout a SVN repo."""
-  logs.info('Syncing %s tests.' % name)
-
-  directory = os.path.join(tests_directory, name)
-  if not os.path.exists(directory):
-    subprocess.check_call(
-        ['svn', 'checkout', repo_url, directory], cwd=tests_directory)
-
-  if os.path.exists(directory):
-    subprocess.check_call(['svn', 'update', directory], cwd=tests_directory)
   else:
     raise Exception('Unable to checkout %s tests.' % name)
 
@@ -229,20 +223,8 @@ def main():
   shell.create_directory(crash_testcases_directory)
   unpack_crash_testcases(crash_testcases_directory)
 
-  # Sync web tests.
-  logs.info('Syncing web tests.')
-  src_directory = os.path.join(tests_directory, 'src')
-  gclient_file_path = os.path.join(tests_directory, '.gclient')
-  if not os.path.exists(gclient_file_path):
-    subprocess.check_call(
-        ['fetch', '--no-history', 'chromium', '--nosvn=True'],
-        cwd=tests_directory)
-  if os.path.exists(src_directory):
-    subprocess.check_call(['gclient', 'revert'], cwd=src_directory)
-    subprocess.check_call(['git', 'pull'], cwd=src_directory)
-    subprocess.check_call(['gclient', 'sync'], cwd=src_directory)
-  else:
-    raise Exception('Unable to checkout web tests.')
+  clone_git_repository(tests_directory, 'src',
+                       'https://chromium.googlesource.com/chromium/src')
 
   clone_git_repository(tests_directory, 'v8',
                        'https://chromium.googlesource.com/v8/v8')
@@ -256,17 +238,8 @@ def main():
   clone_git_repository(tests_directory, 'webgl-conformance-tests',
                        'https://github.com/KhronosGroup/WebGL.git')
 
-  checkout_svn_repository(
-      tests_directory, 'WebKit/LayoutTests',
-      'http://svn.webkit.org/repository/webkit/trunk/LayoutTests')
-
-  checkout_svn_repository(
-      tests_directory, 'WebKit/JSTests/stress',
-      'http://svn.webkit.org/repository/webkit/trunk/JSTests/stress')
-
-  checkout_svn_repository(
-      tests_directory, 'WebKit/JSTests/es6',
-      'http://svn.webkit.org/repository/webkit/trunk/JSTests/es6')
+  clone_git_repository(tests_directory, 'WebKit',
+                       'https://github.com/WebKit/WebKit.git')
 
   create_gecko_tests_directory(tests_directory, 'gecko-dev', 'gecko-tests')
 
@@ -292,7 +265,9 @@ def main():
           tests_archive_local,
           'CrashTests',
           'LayoutTests',
-          'WebKit',
+          'WebKit/JSTests/es6',
+          'WebKit/JSTests/stress',
+          'WebKit/LayoutTests',
           'gecko-tests',
           'v8/test/mjsunit',
           'spidermonkey',

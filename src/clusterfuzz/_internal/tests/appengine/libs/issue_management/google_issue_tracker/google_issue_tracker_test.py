@@ -29,6 +29,7 @@ EXTENSION_FIELDS = {
 TEST_CONFIG = {
     'default_component_id': 1337,
     'type': 'google-issue-tracker',
+    'url': 'https://issues.chromium.org/issues',
 }
 
 BASIC_ISSUE = {
@@ -357,7 +358,7 @@ class GoogleIssueTrackerTest(unittest.TestCase):
                         {
                             'customFieldId': '1223084',
                             'repeatedEnumValue': {
-                                'values': ['Linux', 'Android']
+                                'values': ['Android', 'Linux']
                             }
                         },
                         {
@@ -380,6 +381,35 @@ class GoogleIssueTrackerTest(unittest.TestCase):
         mock.call().execute(http=None, num_retries=3),
     ])
 
+  def test_new_issue_with_empty_os_label(self):
+    """Test new issue creation with "empty" OS label."""
+    issue = self.issue_tracker.new_issue()
+    issue.status = 'NEW'
+    issue.title = 'issue title'
+    issue.labels.add('OS-')
+    issue.save()
+    self.client.issues().create.assert_has_calls([
+        mock.call(
+            body={
+                'issueState': {
+                    'componentId': 1337,
+                    'ccs': [],
+                    'collaborators': [],
+                    'hotlistIds': [],
+                    'accessLimit': {
+                        'accessLevel': issue_tracker.IssueAccessLevel.LIMIT_NONE
+                    },
+                    'status': 'NEW',
+                    'title': 'issue title',
+                    'type': 'BUG',
+                    'severity': 'S4',
+                },
+            },
+            templateOptions_applyTemplate=True,
+        ),
+        mock.call().execute(http=None, num_retries=3),
+    ])
+
   def test_new_issue_with_component_tags(self):
     """Test new issue creation with component tags."""
     self.client.components().get().execute.return_value = {
@@ -393,13 +423,12 @@ class GoogleIssueTrackerTest(unittest.TestCase):
     issue.body = 'issue body'
     issue.ccs.add('cc@google.com')
     issue.labels.add('12345')
-    issue.labels.add('OS-Linux')
-    issue.labels.add('OS-Android')
     issue.labels.add('FoundIn-123')
     issue.labels.add('FoundIn-789')
     issue.components.add('ABC>DEF')
     issue.components.add('IJK>XYZ')
     issue.components.add('1456567')
+    issue.component_id = 987654321
     issue.status = 'ASSIGNED'
     issue.title = 'issue title'
     issue.save()
@@ -412,7 +441,7 @@ class GoogleIssueTrackerTest(unittest.TestCase):
             body={
                 'issueState': {
                     'componentId':
-                        1337,
+                        987654321,
                     'ccs': [{
                         'emailAddress': 'cc@google.com'
                     }],
@@ -434,11 +463,6 @@ class GoogleIssueTrackerTest(unittest.TestCase):
                     'type':
                         'BUG',
                     'customFields': [{
-                        'customFieldId': '1223084',
-                        'repeatedEnumValue': {
-                            'values': ['Linux', 'Android']
-                        },
-                    }, {
                         'customFieldId': '1222907',
                         'repeatedEnumValue': {
                             'values': ['ABC>DEF', 'Component ABC', 'IJK>XYZ']
@@ -712,7 +736,7 @@ class GoogleIssueTrackerTest(unittest.TestCase):
                         {
                             'customFieldId': '1223084',
                             'repeatedEnumValue': {
-                                'values': ['Linux', 'Android']
+                                'values': ['Android', 'Linux']
                             }
                         },
                         {
@@ -731,6 +755,83 @@ class GoogleIssueTrackerTest(unittest.TestCase):
                     '',
                 'significanceOverride':
                     'MAJOR',
+            },
+        ),
+        mock.call().execute(http=None, num_retries=3),
+    ])
+
+  def test_update_issue_with_empty_os(self):
+    """Test updating an existing issue with an "empty" OS label."""
+    self.client.issues().get().execute.return_value = {
+        'issueId': '68828938',
+        'issueState': {
+            'componentId':
+                '29002',
+            'type':
+                'BUG',
+            'customFields': [
+                {
+                    'customFieldId': '1223084',
+                    'repeatedEnumValue': {
+                        'values': ['Linux']  # Existing OS-Linux.
+                    },
+                },
+            ],
+            'status':
+                'NEW',
+            'priority':
+                'P2',
+            'severity':
+                'S2',
+            'title':
+                'test',
+            'reporter': {
+                'emailAddress': 'user1@google.com',
+                'userGaiaStatus': 'ACTIVE'
+            },
+            'assignee': {
+                'emailAddress': 'assignee@google.com',
+                'userGaiaStatus': 'ACTIVE'
+            },
+            'retention':
+                'COMPONENT_DEFAULT',
+        },
+        'createdTime': '2019-06-25T01:29:30.021Z',
+        'modifiedTime': '2019-06-25T01:29:30.021Z',
+        'userData': {},
+        'accessLimit': {
+            'accessLevel': 'INTERNAL'
+        },
+        'etag': 'TmpnNE1qZzVNemd0TUMweA==',
+        'lastModifier': {
+            'emailAddress': 'user1@google.com',
+            'userGaiaStatus': 'ACTIVE'
+        },
+    }
+
+    issue = self.issue_tracker.get_issue(68828938)
+    # Adding "empty" OS label here.
+    issue.labels.add('OS-')
+    # Also add a real OS label to trigger an API call we can compare against.
+    issue.labels.add('OS-Android')
+    issue.save()
+
+    self.client.issues().modify.assert_has_calls([
+        mock.call(
+            issueId='68828938',
+            body={
+                'add': {
+                    'customFields': [{
+                        'customFieldId': '1223084',
+                        'repeatedEnumValue': {
+                            'values': ['Android', 'Linux']
+                        }
+                    },],
+                },
+                'addMask': 'customFields',
+                'remove': {},
+                'removeMask': '',
+                'significanceOverride': 'MAJOR',
             },
         ),
         mock.call().execute(http=None, num_retries=3),
@@ -814,6 +915,7 @@ class GoogleIssueTrackerTest(unittest.TestCase):
     issue.components.add('1111111')
     # Will be rejected because it is not in allowed enum values.
     issue.components.add('AAA')
+    issue.component_id = 987654321
     issue.save()
 
     self.client.components().get.assert_has_calls([
@@ -850,6 +952,16 @@ class GoogleIssueTrackerTest(unittest.TestCase):
                 'addMask': 'status,assignee,reporter,title,ccs,customFields',
                 'remove': {},
                 'removeMask': '',
+                'significanceOverride': 'MAJOR',
+            },
+        ),
+        mock.call().execute(http=None, num_retries=3),
+    ])
+    self.client.issues().move.assert_has_calls([
+        mock.call(
+            issueId='68828938',
+            body={
+                'componentId': 987654321,
                 'significanceOverride': 'MAJOR',
             },
         ),

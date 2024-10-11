@@ -105,16 +105,18 @@ def utask_main(uworker_input):
   else:
     build_revision = testcase.crash_revision
 
+  fuzz_target = testcase_manager.get_fuzz_target_from_input(uworker_input)
+  fuzz_target = fuzz_target.binary if fuzz_target else None
   # Set up a custom or regular build based on revision.
-  build = build_manager.setup_build(build_revision)
+  build = build_manager.setup_build(build_revision, fuzz_target)
 
   # Get crash revision used in setting up build.
   crash_revision = environment.get_value('APP_REVISION')
 
-  if not build_manager.check_app_path():
-    return uworker_msg_pb2.Output(
+  if not build or not build_manager.check_app_path():
+    return uworker_msg_pb2.Output(  # pylint: disable=no-member
         error_message='Build setup failed',
-        error_type=uworker_msg_pb2.ErrorType.SYMBOLIZE_BUILD_SETUP_ERROR)
+        error_type=uworker_msg_pb2.ErrorType.SYMBOLIZE_BUILD_SETUP_ERROR)  # pylint: disable=no-member
 
   # ASAN tool settings (if the tool is used).
   # See if we can get better stacks with higher redzone sizes.

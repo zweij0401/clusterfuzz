@@ -41,6 +41,9 @@ from clusterfuzz._internal.system import environment
 def _add_default_issue_metadata(testcase: data_types.Testcase,
                                 fuzz_target_metadata: Dict):
   """Adds the default issue metadata (e.g. components, labels) to testcase."""
+  if fuzz_target_metadata is None:
+    return
+
   testcase_metadata = testcase.get_metadata()
   for key, default_value in fuzz_target_metadata.items():
     # Only string metadata are supported.
@@ -76,8 +79,8 @@ def handle_analyze_no_revisions_list_error(output):
   handle_build_setup_error(output)
 
 
-def setup_build(testcase: data_types.Testcase,
-                bad_revisions) -> Optional[uworker_msg_pb2.Output]:  # pylint: disable=no-member
+def setup_build(testcase: data_types.Testcase, bad_revisions,
+                fuzz_target) -> Optional[uworker_msg_pb2.Output]:  # pylint: disable=no-member
   """Set up a custom or regular build based on revision. For regular builds,
   if a provided revision is not found, set up a build with the
   closest revision <= provided revision."""
@@ -97,7 +100,10 @@ def setup_build(testcase: data_types.Testcase,
           error_type=uworker_msg_pb2.ErrorType.ANALYZE_NO_REVISION_INDEX)  # pylint: disable=no-member
     revision = revision_list[revision_index]
 
-  build_manager.setup_build(revision)
+  fuzz_target = fuzz_target.binary if fuzz_target else None
+  if not build_manager.setup_build(revision, fuzz_target):
+    return uworker_msg_pb2.Output(  # pylint: disable=no-member
+        error_type=uworker_msg_pb2.ErrorType.ANALYZE_BUILD_SETUP)  # pylint: disable=no-member
   return None
 
 
@@ -128,8 +134,8 @@ def prepare_env_for_main(testcase_upload_metadata):
 
 
 def setup_testcase_and_build(
-    testcase, job_type, setup_input,
-    bad_revisions) -> (Optional[str], Optional[uworker_msg_pb2.Output]):  # pylint: disable=no-member
+    testcase, job_type, setup_input, bad_revisions,
+    fuzz_target) -> (Optional[str], Optional[uworker_msg_pb2.Output]):  # pylint: disable=no-member
   """Sets up the |testcase| and builds. Returns the path to the testcase on
   success, None on error."""
   # Set up testcase and get absolute testcase path.
@@ -139,7 +145,7 @@ def setup_testcase_and_build(
     return None, error
 
   # Set up build.
-  error = setup_build(testcase, bad_revisions)
+  error = setup_build(testcase, bad_revisions, fuzz_target)
   if error:
     return None, error
 
@@ -147,8 +153,8 @@ def setup_testcase_and_build(
   # to setup correctly.
   if not build_manager.check_app_path():
     # Let postprocess handle ANALYZE_BUILD_SETUP and restart tasks if needed.
-    return None, uworker_msg_pb2.Output(
-        error_type=uworker_msg_pb2.ErrorType.ANALYZE_BUILD_SETUP)
+    return None, uworker_msg_pb2.Output(  # pylint: disable=no-member
+        error_type=uworker_msg_pb2.ErrorType.ANALYZE_BUILD_SETUP)  # pylint: disable=no-member
 
   update_testcase_after_build_setup(testcase)
   testcase.absolute_path = testcase_file_path
@@ -353,9 +359,12 @@ def utask_main(uworker_input):
     # Creates empty local blacklist so all leaks will be visible to uploader.
     leak_blacklist.create_empty_local_blacklist()
 
+  # TODO(metzman): Move this function outside of testcase_manager.
+  # Also, make it get the binary.
+  fuzz_target = testcase_manager.get_fuzz_target_from_input(uworker_input)
   testcase_file_path, output = setup_testcase_and_build(
       testcase, uworker_input.job_type, uworker_input.setup_input,
-      uworker_input.analyze_task_input.bad_revisions)
+      uworker_input.analyze_task_input.bad_revisions, fuzz_target)
   testcase.crash_revision = environment.get_value('APP_REVISION')
 
   if not testcase_file_path:
@@ -365,7 +374,6 @@ def utask_main(uworker_input):
 
   # Initialize some variables.
   test_timeout = environment.get_value('TEST_TIMEOUT')
-  fuzz_target = testcase_manager.get_fuzz_target_from_input(uworker_input)
   result, http_flag = test_for_crash_with_retries(
       fuzz_target, testcase, testcase_file_path, test_timeout)
 
